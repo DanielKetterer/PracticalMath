@@ -1,0 +1,8 @@
+# Econometrics Primer - Pinned Dependencies
+# Install via: pip install -r requirements.txt
+numpy==1.24.0
+pandas==2.2.3
+scipy==1.14.1
+matplotlib==3.7.5
+Pillow==11.3.0
+reportlab==4.4.5
