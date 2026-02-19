@@ -51,24 +51,29 @@ CB, CO, CG, CR, CP, CY = "#2171B5", "#E6550D", "#31A354", "#DE2D26", "#756BB1", 
 
 
 import os
+import sys
 try:
     OUTDIR = os.path.dirname(os.path.abspath(__file__))
 except NameError:
     OUTDIR = os.getcwd()
+# Ensure the methods package is importable
+sys.path.insert(0, OUTDIR)
+
+# --- Import encapsulated methods ---
+from methods.utils import ols_fit, add_const
+from methods import ols as m_ols
+from methods import fwl as m_fwl
+from methods import heteroskedasticity as m_het
+from methods import iv_2sls as m_iv
+from methods import panel_fe as m_fe
+from methods import did as m_did
+from methods import rdd as m_rdd
+from methods import binary_outcomes as m_bin
+from methods import mle as m_mle
+from methods import bootstrap as m_boot
 
 def savefig(fig, name):
     fig.savefig(os.path.join(OUTDIR, name), bbox_inches="tight", dpi=150); plt.close(fig)
-def ols_fit(X, y):
-    n, k = X.shape
-    b = np.linalg.lstsq(X, y, rcond=None)[0]
-    e = y - X @ b
-    s2 = (e @ e) / (n - k)
-    se = np.sqrt(np.diag(s2 * np.linalg.inv(X.T @ X)))
-    return b, se, e, s2
-
-def add_const(x):
-    x = np.atleast_2d(x).T if x.ndim == 1 else x
-    return np.column_stack([np.ones(x.shape[0]), x])
 
 # =========================================================================
 # We collect the section text blocks so we can interleave them in the PDF.
@@ -163,11 +168,13 @@ v_sd = np.sqrt(4 - rho**2)  # so Var(schooling) = rho^2*Var(ability) + Var(v) = 
 schooling = 12 + rho * ability + np.random.normal(0, v_sd, n)
 wage = 2.5*schooling + 1.5*ability + np.random.normal(0, 3, n)
 X1 = add_const(schooling)
-b1, se1, e1, _ = ols_fit(X1, wage)
+res_short = m_ols.estimate(X1, wage)
+b1, se1, e1 = res_short["beta"], res_short["se"], res_short["residuals"]
 X2 = add_const(np.column_stack([schooling, ability]))
-b2, se2, e2, _ = ols_fit(X2, wage)
+res_long = m_ols.estimate(X2, wage)
+b2, se2, e2 = res_long["beta"], res_long["se"], res_long["residuals"]
 
-f1 = X1 @ b1
+f1 = res_short["fitted"]
 print(f"\nManual OLS:")
 print(f"  beta_hat (intercept) = {b1[0]:.3f}  SE = {se1[0]:.3f}")
 print(f"  beta_hat (schooling) = {b1[1]:.3f}  SE = {se1[1]:.3f}")
@@ -234,13 +241,9 @@ savefig(fig,"fig01_ols.png")
 
 # --- Supplementary Figure 1B: Monte Carlo Demonstration of OVB ---
 n_mc = 500; n_sims = 1000
-mc_short = np.empty(n_sims); mc_long = np.empty(n_sims)
-for sim in range(n_sims):
-    ab_mc = np.random.normal(0, 1, n_mc)
-    sc_mc = 12 + rho * ab_mc + np.random.normal(0, v_sd, n_mc)
-    wg_mc = 2.5*sc_mc + 1.5*ab_mc + np.random.normal(0, 3, n_mc)
-    mc_short[sim] = ols_fit(add_const(sc_mc), wg_mc)[0][1]
-    mc_long[sim] = ols_fit(add_const(np.column_stack([sc_mc, ab_mc])), wg_mc)[0][1]
+mc_result = m_ols.monte_carlo_ovb(n_mc, n_sims, rho)
+mc_short = mc_result["mc_short"]
+mc_long = mc_result["mc_long"]
 
 fig_mc, axes_mc = plt.subplots(1, 3, figsize=(15, 4.5))
 
@@ -372,12 +375,15 @@ print(section2_text)
 
 experience = np.random.normal(10, 3, n)
 wage2 = 2.0*schooling + 1.0*experience + np.random.normal(0, 2, n)
-b2f,_,_,_ = ols_fit(add_const(np.column_stack([schooling, experience])), wage2)
-_,_,rw,_ = ols_fit(add_const(experience), wage2)
-_,_,rs,_ = ols_fit(add_const(experience), schooling)
-fwl = (rs@rw)/(rs@rs)
-print(f"\nFull regression beta_hat(schooling)   : {b2f[1]:.6f}")
-print(f"FWL partialled beta_hat(schooling)    : {fwl:.6f}")
+X_full_fwl = add_const(np.column_stack([schooling, experience]))
+fwl_verify = m_fwl.verify_fwl(wage2, X_full_fwl, idx_interest=1)
+b2f = ols_fit(X_full_fwl, wage2)[0]
+fwl_result = m_fwl.partial_out(wage2, schooling, add_const(experience))
+fwl = fwl_result["fwl_coef"]
+rw = fwl_result["resid_y"]
+rs = fwl_result["resid_X1"]
+print(f"\nFull regression beta_hat(schooling)   : {fwl_verify['full_coef']:.6f}")
+print(f"FWL partialled beta_hat(schooling)    : {fwl_verify['fwl_coef']:.6f}")
 print("  -> Identical. FWL theorem confirmed.")
 print("  Interpretation: beta_hat(schooling) measures the relationship between")
 print("  schooling and wages *after removing the linear influence of experience*.")
@@ -478,13 +484,15 @@ print(section3_text)
 x3 = np.random.uniform(1, 10, n)
 y3 = 1 + 2*x3 + np.random.normal(0, x3*0.5, n)
 X3 = add_const(x3)
-b3, se3h, e3, _ = ols_fit(X3, y3)
+het_result = m_het.estimate_with_robust_se(X3, y3)
+b3 = het_result["beta"]
+se3h = het_result["se_classical"]
+se3r = het_result["se_robust"]
+e3 = het_result["residuals"]
 esq = e3**2
 bp_b,bp_se,_,_ = ols_fit(X3, esq)
-bp_F = (bp_b[1]/bp_se[1])**2; bp_p = 1-stats.f.cdf(bp_F,1,n-2)
-# HC1
-meat = (X3.T * esq) @ X3; bread = np.linalg.inv(X3.T @ X3)
-se3r = np.sqrt(np.diag(bread@meat@bread * n/(n-2)))
+bp_F = het_result["bp_test"]["F_stat"]
+bp_p = het_result["bp_test"]["p_value"]
 print(f"\nBreusch-Pagan test  F = {bp_F:.2f},  p = {bp_p:.4f}")
 print("  p < 0.05 -> reject homoskedasticity")
 print(f"\nSE(x) -- homoskedastic : {se3h[1]:.4f}")
@@ -618,36 +626,20 @@ aiv = np.random.normal(0,1,n)
 dist = np.random.uniform(0,50,n)
 siv = 14 - .05*dist + .3*aiv + np.random.normal(0,1,n)
 wiv = 2.5*siv + 1.5*aiv + np.random.normal(0,2,n)
-b_ols,_,_,_ = ols_fit(add_const(siv), wiv)
 Z = add_const(dist)
-b_fs,se_fs,_,_ = ols_fit(Z, siv); Fiv=(b_fs[1]/se_fs[1])**2
-shat = Z@b_fs
-b_2s,_,_,_ = ols_fit(add_const(shat), wiv)
-b_rf,_,_,_ = ols_fit(Z, wiv)
 
-# --- Correct 2SLS Standard Errors ---
-# Key insight: the 2SLS coefficient from regressing Y on X_hat is correct,
-# but the SE must use residuals computed with the ACTUAL endogenous X.
-# Naive OLS-on-fitted uses residuals Y - X_hat*beta, which are inflated by
-# the first-stage residual variance, overstating sigma^2.
-X_2s = add_const(shat)
-X_actual = add_const(siv)  # actual endogenous variable
-n_iv = len(wiv)
-k_iv = X_2s.shape[1]
-# CORRECT residuals: Y - X_actual * beta_2sls (not Y - X_hat * beta_2sls)
-e_2sls_correct = wiv - X_actual @ b_2s
-# NAIVE residuals for comparison
-e_2sls_naive = wiv - X_2s @ b_2s
-# Homoskedastic 2SLS SE: sigma^2_correct * (X_hat'X_hat)^{-1}
-sigma2_correct = (e_2sls_correct @ e_2sls_correct) / (n_iv - k_iv)
-sigma2_naive = (e_2sls_naive @ e_2sls_naive) / (n_iv - k_iv)
-bread_2sls = np.linalg.inv(X_2s.T @ X_2s)
-se_2sls_hom = np.sqrt(sigma2_correct * bread_2sls[1, 1])
-se_2sls_naive = np.sqrt(sigma2_naive * bread_2sls[1, 1])
-# Robust (HC1) 2SLS SE: sandwich with X_hat
-meat_2sls = (X_2s.T * e_2sls_correct**2) @ X_2s
-var_2sls_rob = bread_2sls @ meat_2sls @ bread_2sls * (n_iv / (n_iv - k_iv))
-se_2sls_rob = np.sqrt(var_2sls_rob[1, 1])
+# --- Use encapsulated 2SLS estimation ---
+iv_result = m_iv.estimate_2sls(Z, siv, wiv)
+b_ols = iv_result["ols_beta"]
+b_2s = iv_result["beta"]
+Fiv = iv_result["F_stat"]
+shat = iv_result["X_hat"]
+se_2sls_hom = iv_result["se_hom"][1]
+se_2sls_rob = iv_result["se_robust"][1]
+se_2sls_naive = iv_result["se_naive"][1]
+b_fs = iv_result["first_stage"]["gamma"]
+se_fs = iv_result["first_stage"]["se"]
+b_rf = ols_fit(Z, wiv)[0]
 
 print(f"\nFirst-stage F-stat (instrument strength): {Fiv:.1f}")
 print(f"  Rule of thumb: F > 10 for 'strong' instrument. {'pass' if Fiv > 10 else 'WEAK'}")
@@ -830,30 +822,13 @@ _corr_check = pd.DataFrame({"u": uid, "tr": tr}).groupby("u")["tr"].mean().corr(
 print(f"  [DGP check] Corr(alpha_i, mean(tr_i)) = {_corr_check:.3f}  (>0 confirms selection)")
 pdf_df=pd.DataFrame({"u":uid,"t":tid,"y":out,"tr":tr})
 b_pool,_,_,_=ols_fit(add_const(tr),out)
-# Within
-om=pdf_df.groupby("u")["y"].transform("mean").values
-tm=pdf_df.groupby("u")["tr"].transform("mean").values
-yd,td=out-om,tr-tm
-b_fe=(td@yd)/(td@td)
-# Clustered SEs (Arellano 1987): cluster at the unit level — from scratch
-# V_cluster = (X'X)^{-1} * B * (X'X)^{-1} where B = sum_g (X_g' e_g)(X_g' e_g)'
-# For univariate within estimator: X_dm = td, Y_dm = yd
-_e_fe = yd - b_fe * td
-_XtX_fe = td @ td
-_B_cl_fe = 0.0
-_G_fe = Nu  # number of clusters (units)
-for _g in range(Nu):
-    _mask_g = (uid == _g)
-    _Xg = td[_mask_g]
-    _eg = _e_fe[_mask_g]
-    _score_g = (_Xg * _eg).sum()
-    _B_cl_fe += _score_g ** 2
-# Finite-sample correction: G/(G-1) * (N-1)/(N-K)
-_N_fe = len(td)
-_K_fe = 1
-_dof_corr_fe = (_G_fe / (_G_fe - 1)) * ((_N_fe - 1) / (_N_fe - _K_fe))
-se_fe_homosk = np.sqrt((_e_fe @ _e_fe) / (_N_fe - _K_fe) / _XtX_fe)
-se_fe_cluster = np.sqrt(_B_cl_fe / _XtX_fe**2 * _dof_corr_fe)
+# Within estimator via encapsulated method
+fe_result = m_fe.estimate_fe(out, tr, uid)
+b_fe = fe_result["beta_fe"]
+se_fe_homosk = fe_result["se_homosk"]
+se_fe_cluster = fe_result["se_cluster"]
+dm = m_fe.within_demean(out, tr, uid)
+td, yd = dm["X_demean"], dm["y_demean"]
 print(f"\nOLS (no FE)   beta_hat(training): {b_pool[1]:.3f}  <- biased (selection on alpha_i)")
 print(f"Within FE     beta_hat(training): {b_fe:.3f}  <- unbiased")
 print("  True effect = 1.8")
@@ -974,13 +949,13 @@ nd=200
 trd=np.random.binomial(1,.5,nd).astype(float)
 pst=np.random.binomial(1,.5,nd).astype(float)
 yd6=2+1*trd+1.5*pst+3*trd*pst+np.random.normal(0,1,nd)
+# DiD via encapsulated method
+did_result = m_did.estimate_did(yd6, trd, pst)
+bd = did_result["beta"]
+sed = did_result["se_classical"]
+ed_did = did_result["residuals"]
+se_did_robust = did_result["se_robust"][3]
 Xd=np.column_stack([np.ones(nd),trd,pst,trd*pst])
-bd,sed,ed_did,_=ols_fit(Xd,yd6)
-# HC1 Robust SEs for DiD — from scratch (sandwich estimator)
-_bread_did = np.linalg.inv(Xd.T @ Xd)
-_meat_did = (Xd.T * ed_did**2) @ Xd
-_var_hc1_did = _bread_did @ _meat_did @ _bread_did * (nd / (nd - Xd.shape[1]))
-se_did_robust = np.sqrt(_var_hc1_did[3, 3])
 print(f"\nDiD coefficient beta_hat_3 : {bd[3]:.3f}")
 print(f"True treatment effect: 3.0")
 print(f"95% CI (homoskedastic): [{bd[3]-1.96*sed[3]:.3f}, {bd[3]+1.96*sed[3]:.3f}]")
@@ -1062,24 +1037,11 @@ true_effect_es = np.where((tid_es >= treatment_time) & (treat_unit == 1),
                            2.0 * (tid_es - treatment_time + 1), 0)
 y_es = alpha_es + gamma_es + true_effect_es + np.random.normal(0, 1.5, N_es * T_es)
 
-# Event study: regress y on unit FE + time FE + leads/lags of treatment
-# Estimate coefficients for each relative time period
-rel_time = tid_es - treatment_time
-event_coefs = []; event_ses = []; event_times = []
-for rt in range(-treatment_time, T_es - treatment_time):
-    if rt == -1:  # reference period
-        event_coefs.append(0); event_ses.append(0); event_times.append(rt)
-        continue
-    # DiD for this relative time vs reference period (-1)
-    mask_rt = (rel_time == rt) | (rel_time == -1)
-    y_rt = y_es[mask_rt]; tr_rt = treat_unit[mask_rt]
-    post_rt = (rel_time[mask_rt] == rt).astype(float)
-    X_rt = np.column_stack([np.ones(mask_rt.sum()), tr_rt, post_rt, tr_rt * post_rt])
-    b_rt, se_rt, _, _ = ols_fit(X_rt, y_rt)
-    event_coefs.append(b_rt[3]); event_ses.append(se_rt[3]); event_times.append(rt)
-
-event_coefs = np.array(event_coefs); event_ses = np.array(event_ses)
-event_times = np.array(event_times)
+# Event study via encapsulated method
+es_result = m_did.event_study(y_es, treat_unit, tid_es, treatment_time)
+event_coefs = es_result["coefs"]
+event_ses = es_result["ses"]
+event_times = es_result["rel_times"]
 
 fig_es, axes_es = plt.subplots(1, 3, figsize=(15, 5))
 
@@ -1265,27 +1227,20 @@ run=np.random.uniform(40,100,n); cut=70.0; tr7=(run>=cut).astype(float)
 y7=1+.3*run+4*tr7+np.random.normal(0,2,n)
 bw=15; mask=np.abs(run-cut)<=bw
 xc=run[mask]-cut; tb=tr7[mask]; yb=y7[mask]
-Xr=np.column_stack([np.ones(mask.sum()),tb,xc,xc*tb])
-br,_,er_rdd,_=ols_fit(Xr,yb)
 
-# --- McCrary Density Test (Section 5 of patch plan) ---
-# Formal test for manipulation/sorting at the cutoff (McCrary 2008)
-# We implement a simple binned density test: compare density just above/below cutoff
-_bw_mc = 10  # bandwidth for density estimation; increased to reduce spurious detection of manipulation
-_below_ct = np.sum((run >= cut - _bw_mc) & (run < cut))
-_above_ct = np.sum((run >= cut) & (run < cut + _bw_mc))
-_mc_stat = (_above_ct - _below_ct) / np.sqrt(_above_ct + _below_ct)  # z-test on counts
-_mc_pval = 2 * (1 - stats.norm.cdf(abs(_mc_stat)))
-_mc_alpha = 0.001  # tighter significance level to reduce false positives in simulation
-try:
-    from rdd import rdd as rdd_module
-    _mc_result_msg = "McCrary test (rdd package) available"
-except ImportError:
-    _mc_result_msg = "McCrary test (formal): install 'rdd' or use rpy2+rddtools for full implementation"
+# --- RDD estimation via encapsulated methods ---
+rdd_result = m_rdd.estimate_rdd(y7, run, cut, bw)
+br = rdd_result["beta"]
+er_rdd = rdd_result["residuals"]
 
-# --- Robust RDD Inference (Section 6 of patch plan) ---
-# Bias-corrected robust CI (Calonico, Cattaneo & Titiunik 2014)
-# Attempt to use rdrobust via rpy2; fall back to manual bias-correction
+# McCrary density test
+_mc_alpha = 0.001
+mc_test = m_rdd.mccrary_density_test(run, cut, bandwidth=10, alpha=_mc_alpha)
+_mc_stat = mc_test["z_stat"]
+_mc_pval = mc_test["p_value"]
+_mc_result_msg = "McCrary test (binned density)"
+
+# Bias-corrected RDD inference
 try:
     import rpy2.robjects as robj
     robj.r('library(rdrobust)')
@@ -1298,34 +1253,10 @@ try:
     _rd_robust_msg = f"Robust (CCT 2014) tau_hat={_rd_est:.3f}, CI=[{_rd_ci_lo:.3f}, {_rd_ci_hi:.3f}]"
     _rd_used_robust = True
 except Exception:
-    # Fallback: manual bias-correction approximation
-    # Fit quadratic on each side to estimate bias
-    _xc_bel = xc[xc < 0]; _yb_bel = yb[xc < 0]
-    _xc_abo = xc[xc >= 0]; _yb_abo = yb[xc >= 0]
-    _Xq_bel = np.column_stack([np.ones(len(_xc_bel)), _xc_bel, _xc_bel**2])
-    _Xq_abo = np.column_stack([np.ones(len(_xc_abo)), _xc_abo, _xc_abo**2])
-    _bq_bel = np.linalg.lstsq(_Xq_bel, _yb_bel, rcond=None)[0]
-    _bq_abo = np.linalg.lstsq(_Xq_abo, _yb_abo, rcond=None)[0]
-    _rd_est_bc = _bq_abo[0] - _bq_bel[0]  # intercept difference with quadratic fit
-    # SE via bootstrap
-    _B_rd = 500
-    _rd_boots = np.zeros(_B_rd)
-    for _b in range(_B_rd):
-        _idx = np.random.choice(len(yb), len(yb), replace=True)
-        _xc_b, _yb_b = xc[_idx], yb[_idx]
-        _bel_b = _xc_b < 0
-        if _bel_b.sum() < 3 or (~_bel_b).sum() < 3:
-            _rd_boots[_b] = np.nan
-            continue
-        _Xq_bel_b = np.column_stack([np.ones(_bel_b.sum()), _xc_b[_bel_b], _xc_b[_bel_b]**2])
-        _Xq_abo_b = np.column_stack([np.ones((~_bel_b).sum()), _xc_b[~_bel_b], _xc_b[~_bel_b]**2])
-        _bq_bel_b = np.linalg.lstsq(_Xq_bel_b, _yb_b[_bel_b], rcond=None)[0]
-        _bq_abo_b = np.linalg.lstsq(_Xq_abo_b, _yb_b[~_bel_b], rcond=None)[0]
-        _rd_boots[_b] = _bq_abo_b[0] - _bq_bel_b[0]
-    _rd_boots = _rd_boots[~np.isnan(_rd_boots)]
-    _rd_se_bc = np.std(_rd_boots)
-    _rd_ci_lo = _rd_est_bc - 1.96 * _rd_se_bc
-    _rd_ci_hi = _rd_est_bc + 1.96 * _rd_se_bc
+    bc_result = m_rdd.bias_corrected_rdd(y7, run, cut, bw, n_boot=500)
+    _rd_est_bc = bc_result["tau_bc"]
+    _rd_ci_lo = bc_result["ci_lo"]
+    _rd_ci_hi = bc_result["ci_hi"]
     _rd_robust_msg = f"Bias-corrected (quadratic) tau_hat={_rd_est_bc:.3f}, CI=[{_rd_ci_lo:.3f}, {_rd_ci_hi:.3f}]"
     _rd_used_robust = False
 
@@ -1372,8 +1303,9 @@ outcomes at the cutoff) is relatively mild and partially testable.
 """
 
 bel=run<cut; abo=~bel
-bb,_,_,_=ols_fit(add_const(run[bel]),y7[bel])
-ba,_,_,_=ols_fit(add_const(run[abo]),y7[abo])
+global_rdd = m_rdd.global_rdd_fit(y7, run, cut)
+bb = global_rdd["beta_below"]
+ba = global_rdd["beta_above"]
 
 fig,axes=plt.subplots(1,3,figsize=(15,5))
 ax=axes[0]
@@ -1466,54 +1398,30 @@ xb8=np.random.normal(0,1,n); zt=-0.5+1.2*xb8
 pt=1/(1+np.exp(-zt)); yb8=np.random.binomial(1,pt,n)
 Xb8=add_const(xb8)
 
-def logistic(z): return 1/(1+np.exp(-np.clip(z,-500,500)))
+# Use the logistic function from binary_outcomes module
+logistic = m_bin.logistic
+# Keep nll functions available for MLE section
 def nll_logit(b,X,y):
     p=np.clip(logistic(X@b),1e-12,1-1e-12); return -np.sum(y*np.log(p)+(1-y)*np.log(1-p))
 def nll_probit(b,X,y):
     p=np.clip(stats.norm.cdf(X@b),1e-12,1-1e-12); return -np.sum(y*np.log(p)+(1-y)*np.log(1-p))
 
-bl=minimize(nll_logit,[0,0],args=(Xb8,yb8),method="BFGS").x
-bp=minimize(nll_probit,[0,0],args=(Xb8,yb8),method="BFGS").x
-blpm,_,_,_=ols_fit(Xb8,yb8)
-pl=logistic(Xb8@bl); ame_l=np.mean(bl[1]*pl*(1-pl))
-ame_p=np.mean(bp[1]*stats.norm.pdf(Xb8@bp))
+# --- Logit and Probit via encapsulated methods ---
+logit_fit = m_bin.fit_logit(Xb8, yb8)
+probit_fit = m_bin.fit_probit(Xb8, yb8)
+lpm_fit = m_bin.fit_lpm(Xb8, yb8)
+bl = logit_fit["beta"]
+bp = probit_fit["beta"]
+blpm = lpm_fit["beta"]
+pl = logit_fit["p_hat"]
+ame_l = m_bin.logit_ame(Xb8, bl)
+ame_p = m_bin.probit_ame(Xb8, bp)
 true_ame=1.2*np.mean(pt*(1-pt))
 
-# --- AME Standard Errors (delta method + bootstrap) ---
-# Delta method SE for AME of logit — from scratch
-# We need the logit MLE covariance matrix: inv(observed Fisher info) = inv(-Hessian)
-_pl_ame = logistic(Xb8 @ bl)
-# Observed Fisher info for logit: I(beta) = X' diag(p*(1-p)) X
-_W_diag = _pl_ame * (1 - _pl_ame)
-_fisher = Xb8.T @ (Xb8 * _W_diag[:, None])
-_logit_cov = np.linalg.inv(_fisher)
-# Gradient of AME w.r.t. beta (averaged over observations)
-_dpdb = np.zeros(2)
-for _i in range(len(yb8)):
-    _pi = _pl_ame[_i]
-    _w = _pi * (1 - _pi)
-    _dw_deta = _pi * (1 - _pi) * (1 - 2*_pi)  # d/d(eta) of p*(1-p)
-    # AME = mean(beta_1 * p_i * (1-p_i))
-    # d(AME)/d(beta_0) = beta_1 * dw/deta * x_i[0] / n
-    # d(AME)/d(beta_1) = (w_i + beta_1 * dw/deta * x_i[1]) / n
-    _dpdb[0] += bl[1] * _dw_deta * Xb8[_i, 0] / len(yb8)
-    _dpdb[1] += (_w + bl[1] * _dw_deta * Xb8[_i, 1]) / len(yb8)
-ame_se_delta = np.sqrt(_dpdb @ _logit_cov @ _dpdb)
-
-# Bootstrap SE for AME
+# --- AME Standard Errors via encapsulated methods ---
 _B_ame = 500
-_ame_boots = np.zeros(_B_ame)
-for _b in range(_B_ame):
-    _idx = np.random.choice(len(yb8), len(yb8), replace=True)
-    try:
-        _res_b = minimize(nll_logit, [0, 0], args=(Xb8[_idx], yb8[_idx]), method="BFGS")
-        _bl_b = _res_b.x
-        _pb = logistic(Xb8[_idx] @ _bl_b)
-        _ame_boots[_b] = np.mean(_bl_b[1] * _pb * (1 - _pb))
-    except Exception:
-        _ame_boots[_b] = np.nan
-_ame_boots_clean = _ame_boots[~np.isnan(_ame_boots)]
-ame_se_boot = np.std(_ame_boots_clean)
+ame_se_delta = m_bin.ame_se_delta(Xb8, bl, yb8)
+ame_se_boot = m_bin.ame_se_bootstrap(Xb8, yb8, n_boot=_B_ame)
 
 print(f"\nLogit  coefficient beta_hat(x): {bl[1]:.3f}")
 print(f"Probit coefficient beta_hat(x): {bp[1]:.3f}")
@@ -1647,15 +1555,11 @@ print(f"\nMLE via scipy.minimize (BFGS):")
 print(f"  beta_hat (intercept): {bl[0]:.4f}  (true: -0.5)")
 print(f"  beta_hat (x)        : {bl[1]:.4f}  (true:  1.2)")
 
-# Standard errors via observed Fisher Information: I(beta_hat) = -d^2 L / d beta d beta'
+# Standard errors via encapsulated MLE framework
 from scipy.optimize import approx_fprime
-hess_approx = np.array([
-    approx_fprime(bl, lambda b: approx_fprime(b, nll_logit,
-                                                      1e-5, Xb8, yb8)[j],
-                  1e-5)
-    for j in range(len(bl))
-])
-se_mle = np.sqrt(np.diag(np.linalg.inv(hess_approx)))
+mle_result = m_mle.fit_mle(nll_logit, np.zeros(2), args=(Xb8, yb8), track_path=True)
+se_mle = mle_result["se"]
+hess_approx = mle_result["hessian"]
 print(f"\n  SE via observed Fisher info: intercept={se_mle[0]:.4f}, x={se_mle[1]:.4f}")
 
 section9_text += f"""
@@ -1682,20 +1586,20 @@ them), invert the Hessian for SEs -- is a transferable skill.
 
 fig,axes=plt.subplots(1,3,figsize=(15,5))
 
-# A: Contours
+# A: Contours -- use encapsulated log-likelihood surface
 ax=axes[0]
 b0g=np.linspace(-1.5,.5,80); b1g=np.linspace(.2,2.2,80)
-B0,B1=np.meshgrid(b0g,b1g)
-LL=np.array([[- nll_logit(np.array([B0[i,j],B1[i,j]]),Xb8,yb8) for j in range(80)] for i in range(80)])
+B0, B1, LL = m_mle.log_likelihood_surface(nll_logit, b0g, b1g, args=(Xb8, yb8))
 cs=ax.contour(B0,B1,LL,levels=20,cmap="RdYlBu_r",linewidths=.8)
 ax.clabel(cs,inline=True,fontsize=6,fmt="%.0f")
 ax.plot(bl[0],bl[1],"r*",ms=15,label="beta_hat_MLE"); ax.plot(-.5,1.2,"g^",ms=12,label="True beta")
 ax.set_xlabel("beta_0"); ax.set_ylabel("beta_1"); ax.set_title("A) Log-Likelihood Contours"); ax.legend(fontsize=9)
 
-# B: Profile likelihood
+# B: Profile likelihood -- use encapsulated profile
 ax=axes[1]
 b1v=np.linspace(.4,2,100)
-llp=np.array([-minimize(lambda b0: nll_logit(np.array([b0[0],b1]),Xb8,yb8),[0.],method="BFGS",options={"disp":False}).fun for b1 in b1v])
+prof = m_mle.profile_likelihood(nll_logit, bl, profile_idx=1, grid=b1v, args=(Xb8, yb8))
+llp = prof["profile_ll"]
 ax.plot(b1v,llp,c=CB,lw=2.5)
 ax.axvline(bl[1],color=CR,ls="--",lw=1.5,label=f"beta_hat_1={bl[1]:.3f}")
 ax.axvline(1.2,color=CG,ls=":",lw=1.5,label="True=1.2")
@@ -1703,15 +1607,12 @@ llm=llp.max(); cim=llp>=(llm-1.92)
 if cim.any():
     ax.axhline(llm-1.92,color=CY,ls=":",lw=1)
     ax.fill_between(b1v,llp.min(),llp,where=cim,alpha=.15,color=CB)
-    ax.text(b1v[cim].min(),llm-5,f"95% CI\n[{b1v[cim].min():.2f},{b1v[cim].max():.2f}]",fontsize=8,color=CB)
+    ax.text(b1v[cim].min(),llm-5,f"95% CI\n[{prof['ci_95'][0]:.2f},{prof['ci_95'][1]:.2f}]",fontsize=8,color=CB)
 ax.set_xlabel("beta_1"); ax.set_ylabel("Profile L"); ax.set_title("B) Profile Likelihood"); ax.legend(fontsize=8)
 
-# C: BFGS path
+# C: BFGS path -- use path from MLE fit
 ax=axes[2]
-path=[np.zeros(2)]
-def cb(xk): path.append(xk.copy())
-minimize(nll_logit,np.zeros(2),args=(Xb8,yb8),method="BFGS",callback=cb)
-path=np.array(path)
+path = mle_result["path"]
 ax.contour(B0,B1,LL,levels=15,cmap="RdYlBu_r",linewidths=.5,alpha=.6)
 ax.plot(path[:,0],path[:,1],"o-",color=CR,lw=1.5,ms=4,label=f"BFGS ({len(path)} steps)")
 ax.plot(path[0,0],path[0,1],"ko",ms=8,label="Start")
@@ -1778,14 +1679,19 @@ print(section10_text)
 B=2000; nb=100
 np.random.seed(0)  # Reset seed for bootstrap reproducibility
 xbt=np.random.normal(0,1,nb); ybt=2+1.5*xbt+np.random.normal(0,2,nb)
-Xbt=add_const(xbt); bo,seo,_,_=ols_fit(Xbt,ybt)
-bc=np.empty(B)
-for b in range(B):
-    idx=np.random.choice(nb,nb,replace=True); bc[b]=ols_fit(Xbt[idx],ybt[idx])[0][1]
-bse=np.std(bc); bci=np.percentile(bc,[2.5,97.5])
-aci=[bo[1]-1.96*seo[1],bo[1]+1.96*seo[1]]
-# Unique observation fraction (Efron 1979): ~1 - 1/e ≈ 0.632
-_unique_frac_theoretical = 1 - (1 - 1/nb)**nb
+Xbt=add_const(xbt)
+
+# Bootstrap via encapsulated method
+boot_result = m_boot.bootstrap_ols_slope(Xbt, ybt, n_boot=B, seed=0)
+bc = boot_result["boot_estimates"]
+bo = ols_fit(Xbt, ybt)[0]
+seo = np.array([0, boot_result["analytic_se"]])  # only need slope SE
+seo_full = ols_fit(Xbt, ybt)[1]
+seo = seo_full
+bse = boot_result["se"]
+bci = np.array([boot_result["ci_lo"], boot_result["ci_hi"]])
+aci = boot_result["analytic_ci"]
+_unique_frac_theoretical = m_boot.unique_obs_fraction(nb)
 print(f"\nBootstrap unique observation fraction: ~{_unique_frac_theoretical:.3f} (theoretical 1-1/e = {1-1/np.e:.3f})")
 print(f"  Each bootstrap sample contains ~63.2% unique observations.")
 print(f"\nAnalytic OLS SE(x) : {seo[1]:.4f}")
