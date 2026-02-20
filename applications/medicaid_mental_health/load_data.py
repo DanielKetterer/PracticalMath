@@ -92,6 +92,40 @@ ALL_STATES = [
 ]
 
 DATA_DIR = Path(__file__).parent / "data"
+ACA_EXPANSION_START_YEAR = min(EXPANSION_YEAR.values())
+
+
+def _resolve_nsduh_dir(nsduh_dir=None):
+    """Resolve the NSDUH directory from common project locations."""
+    if nsduh_dir is not None:
+        p = Path(nsduh_dir)
+        if p.exists():
+            return p
+        raise FileNotFoundError(
+            f"NSDUH data directory not found: {p}"
+        )
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        DATA_DIR / "nsduh",
+        repo_root / "data" / "nsduh",
+        DATA_DIR,
+        repo_root / "data",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+
+    raise FileNotFoundError(
+        "NSDUH data directory not found in expected locations:\n"
+        f"  - {DATA_DIR / 'nsduh'}\n"
+        f"  - {repo_root / 'data' / 'nsduh'}\n"
+        f"  - {DATA_DIR}\n"
+        f"  - {repo_root / 'data'}\n"
+        "Download NSDUH SAE State Prevalence CSV ZIP files from:\n"
+        "  https://www.samhsa.gov/data/nsduh/state-reports\n"
+        "and place them in one of these directories."
+    )
 
 # ---------------------------------------------------------------------------
 # NSDUH State Prevalence Estimates -- CSV loader
@@ -190,6 +224,79 @@ def parse_nsduh_sae_csv(csv_path):
     return results
 
 
+def _parse_generated_nsduh_panel_csv(csv_path):
+    """
+    Parse a generated NSDUH panel CSV with columns like:
+    state, year, value/outcome/estimate.
+    """
+    with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+
+        state_col = None
+        year_col = None
+        value_col = None
+        for col in fieldnames:
+            cl = col.lower().strip()
+            if state_col is None and "state" in cl:
+                state_col = col
+            if year_col is None and "year" in cl:
+                year_col = col
+            if value_col is None and any(k in cl for k in ("value", "outcome", "estimate", "percent")):
+                value_col = col
+
+        if state_col is None or year_col is None or value_col is None:
+            return None
+
+        state_list = sorted(ALL_STATES)
+        state_to_idx = {s: i for i, s in enumerate(state_list)}
+        records = []
+        for row in reader:
+            state = row.get(state_col, "").strip()
+            if state not in state_to_idx:
+                continue
+
+            try:
+                yr = int(row.get(year_col, "").strip())
+            except ValueError:
+                continue
+
+            val_str = row.get(value_col, "").strip().replace(",", "")
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+
+            records.append((state_to_idx[state], yr, val))
+
+    if not records:
+        return None
+
+    arr = np.array(records)
+    state_ids = arr[:, 0].astype(int)
+    year_ids = arr[:, 1].astype(int)
+    y = arr[:, 2]
+
+    treated = np.zeros(len(y))
+    post = (year_ids >= ACA_EXPANSION_START_YEAR).astype(float)
+    for i, (sid, yr) in enumerate(zip(state_ids, year_ids)):
+        state_name = state_list[sid]
+        exp_year = EXPANSION_YEAR.get(state_name)
+        if exp_year is not None:
+            treated[i] = 1.0
+
+    return dict(
+        y=y,
+        treated=treated,
+        post=post,
+        state_ids=state_ids,
+        year_ids=year_ids,
+        state_names=state_list,
+        years=np.array(sorted(set(year_ids))),
+        outcome_label="nsduh_generated_csv",
+    )
+
+
 def load_nsduh_panel(
     nsduh_dir=None,
     outcome="ami",
@@ -216,17 +323,20 @@ def load_nsduh_panel(
     dict with arrays: y, treated, post, state_ids, year_ids, state_names,
                       years, outcome_label
     """
-    if nsduh_dir is None:
-        nsduh_dir = DATA_DIR / "nsduh"
+    nsduh_dir = _resolve_nsduh_dir(nsduh_dir)
 
-    nsduh_dir = Path(nsduh_dir)
-    if not nsduh_dir.exists():
-        raise FileNotFoundError(
-            f"NSDUH data directory not found: {nsduh_dir}\n"
-            "Download NSDUH SAE State Prevalence CSV ZIP files from:\n"
-            "  https://www.samhsa.gov/data/nsduh/state-reports\n"
-            "and place them in the data/nsduh/ directory."
-        )
+    # Support pre-generated panel CSV files for direct analysis.
+    for generated_name in (
+        "nsduh_panel.csv",
+        "nsduh_generated.csv",
+        "nsduh.csv",
+    ):
+        generated_path = nsduh_dir / generated_name
+        if generated_path.exists():
+            panel = _parse_generated_nsduh_panel_csv(generated_path)
+            if panel is not None:
+                print(f"  [NSDUH] Loaded generated panel CSV: {generated_path}")
+                return panel
 
     start_yr, end_yr = year_range
     years = list(range(start_yr, end_yr + 1))
@@ -270,14 +380,12 @@ def load_nsduh_panel(
 
     # Build treatment indicators
     treated = np.zeros(len(y))
-    post = np.zeros(len(y))
+    post = (year_ids >= ACA_EXPANSION_START_YEAR).astype(float)
     for i, (sid, yr) in enumerate(zip(state_ids, year_ids)):
         state_name = state_list[sid]
         exp_year = EXPANSION_YEAR.get(state_name)
         if exp_year is not None:
             treated[i] = 1.0
-            if yr >= exp_year:
-                post[i] = 1.0
 
     return dict(
         y=y,
@@ -474,14 +582,12 @@ def load_cms_enrollment_panel(
     y = records[:, 2]
 
     treated = np.zeros(len(y))
-    post = np.zeros(len(y))
+    post = (year_ids >= ACA_EXPANSION_START_YEAR).astype(float)
     for i, (sid, yr) in enumerate(zip(state_ids, year_ids)):
         state_name = state_list[sid]
         exp_year = EXPANSION_YEAR.get(state_name)
         if exp_year is not None:
             treated[i] = 1.0
-            if yr >= exp_year:
-                post[i] = 1.0
 
     label = "log_medicaid_enrollment" if log_enrollment else "medicaid_enrollment"
     return dict(
