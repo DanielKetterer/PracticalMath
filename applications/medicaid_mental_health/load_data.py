@@ -40,6 +40,7 @@ import urllib.request
 import urllib.error
 import zipfile
 from pathlib import Path
+from urllib.parse import urljoin
 
 import numpy as np
 
@@ -100,11 +101,8 @@ def _resolve_nsduh_dir(nsduh_dir=None):
     """Resolve the NSDUH directory from common project locations."""
     if nsduh_dir is not None:
         p = Path(nsduh_dir)
-        if p.exists():
-            return p
-        raise FileNotFoundError(
-            f"NSDUH data directory not found: {p}"
-        )
+        p.mkdir(parents=True, exist_ok=True)
+        return p
 
     repo_root = Path(__file__).resolve().parents[2]
     candidates = [
@@ -117,16 +115,10 @@ def _resolve_nsduh_dir(nsduh_dir=None):
         if c.exists():
             return c
 
-    raise FileNotFoundError(
-        "NSDUH data directory not found in expected locations:\n"
-        f"  - {DATA_DIR / 'nsduh'}\n"
-        f"  - {repo_root / 'data' / 'nsduh'}\n"
-        f"  - {DATA_DIR}\n"
-        f"  - {repo_root / 'data'}\n"
-        "Download NSDUH SAE State Prevalence CSV ZIP files from:\n"
-        "  https://www.samhsa.gov/data/nsduh/state-reports\n"
-        "and place them in one of these directories."
-    )
+    # Auto-create default directory so downstream loader can populate it.
+    default_dir = repo_root / "data" / "nsduh"
+    default_dir.mkdir(parents=True, exist_ok=True)
+    return default_dir
 
 # ---------------------------------------------------------------------------
 # NSDUH State Prevalence Estimates -- CSV loader
@@ -138,6 +130,11 @@ NSDUH_DOWNLOAD_URLS = {
     "2022-2023": "https://www.samhsa.gov/data/data-we-collect/nsduh-national-survey-drug-use-and-health/state-releases/2022-2023",
     "2023-2024": "https://www.samhsa.gov/data/nsduh/state-reports",
 }
+
+NSDUH_STATE_RELEASES_INDEX = (
+    "https://www.samhsa.gov/data/data-we-collect/"
+    "nsduh-national-survey-drug-use-and-health/state-releases"
+)
 
 # Table numbers for key mental health measures in NSDUH SAE files.
 # These table numbers correspond to CSV filenames inside the ZIP.
@@ -454,6 +451,9 @@ def load_nsduh_panel(
                       years, outcome_label
     """
     nsduh_dir = _resolve_nsduh_dir(nsduh_dir)
+
+    # If no local NSDUH CSVs are detected, auto-download and extract them.
+    _auto_prepare_nsduh_data(nsduh_dir)
 
     # Support pre-generated panel CSV files for direct analysis.
     for generated_name in (
