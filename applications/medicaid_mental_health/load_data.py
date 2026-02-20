@@ -35,6 +35,7 @@ import csv
 import io
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 import zipfile
@@ -260,19 +261,52 @@ def _load_fetcher_derived_panel(nsduh_dir, outcome, year_range):
 def _find_nsduh_csv(nsduh_dir, table_prefix):
     """Search for an NSDUH SAE CSV by table prefix in the given directory."""
     nsduh_path = Path(nsduh_dir)
-    # Try both direct CSVs and inside ZIP files
-    for f in sorted(nsduh_path.glob("*.csv")):
+    # Try direct CSVs anywhere under the directory tree.
+    for f in sorted(nsduh_path.rglob("*.csv")):
         if table_prefix.lower() in f.stem.lower():
             return f
 
     # Try extracting from ZIP
-    for z in sorted(nsduh_path.glob("*.zip")):
+    for z in sorted(nsduh_path.rglob("*.zip")):
         with zipfile.ZipFile(z) as zf:
             for name in zf.namelist():
                 if table_prefix.lower() in name.lower() and name.endswith(".csv"):
-                    zf.extract(name, nsduh_path)
-                    return nsduh_path / name
+                    target = nsduh_path / "extracted" / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(name) as src, open(target, "wb") as dst:
+                        dst.write(src.read())
+                    return target
     return None
+
+
+def _normalize_col_name(name):
+    name = (name or "").strip().lower()
+    name = re.sub(r"[%\(\)\[\]\-]", " ", name)
+    name = re.sub(r"\s+", " ", name)
+    return name
+
+
+def _find_column(columns, patterns):
+    for col in columns:
+        norm = _normalize_col_name(col)
+        for pat in patterns:
+            if re.search(pat, norm):
+                return col
+    return None
+
+
+def _to_float(val):
+    text = str(val or "").strip()
+    if text == "" or text.lower() in {"nan", "na", "n/a", "suppressed", "not available"}:
+        return None
+    text = text.replace("%", "")
+    text = re.sub(r"[^\d\.\-]+", "", text)
+    if text in {"", "-", "."}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
 
 
 def parse_nsduh_sae_csv(csv_path):
@@ -288,8 +322,10 @@ def parse_nsduh_sae_csv(csv_path):
     -------
     dict : {state_name: float} -- prevalence percentage for each state
     """
-    with open(csv_path, "r", encoding="utf-8-sig") as f:
-        lines = f.readlines()
+    with open(csv_path, "r", encoding="utf-8-sig", errors="replace") as f:
+        text = f.read().replace("\x00", "")
+
+    lines = text.splitlines()
 
     # Find the header row (first row that contains "State" or "Order")
     header_idx = None
@@ -302,33 +338,41 @@ def parse_nsduh_sae_csv(csv_path):
     if header_idx is None:
         raise ValueError(f"Could not find header row in {csv_path}")
 
-    reader = csv.DictReader(lines[header_idx:])
-    fieldnames = reader.fieldnames
+    sample = "\n".join(lines[header_idx: header_idx + 10])
+    try:
+        delimiter = csv.Sniffer().sniff(sample, delimiters=[",", "\t", ";", "|"]).delimiter
+    except Exception:
+        delimiter = ","
 
-    # Identify the state column and first numeric estimate column
-    state_col = None
-    estimate_col = None
-    for col in fieldnames:
-        cl = col.lower().strip()
-        if "state" in cl and state_col is None:
-            state_col = col
-        elif ("estimate" in cl or "percent" in cl) and estimate_col is None:
-            estimate_col = col
+    reader = csv.DictReader(lines[header_idx:], delimiter=delimiter)
+    fieldnames = reader.fieldnames or []
 
-    if state_col is None or estimate_col is None:
-        # Fallback: assume first column is state, second is estimate
+    # Identify columns robustly (NSDUH layouts vary by release)
+    state_col = _find_column(fieldnames, [r"\bstate\b", r"\bgeography\b"])
+    estimate_col = _find_column(
+        fieldnames,
+        [
+            r"\bestimate\b",
+            r"\bpercent\b",
+            r"\bpercentage\b",
+            r"\bvalue\b",
+        ],
+    )
+
+    if state_col is None and fieldnames:
         state_col = fieldnames[0]
+    if estimate_col is None and len(fieldnames) > 1:
         estimate_col = fieldnames[1]
+    if state_col is None or estimate_col is None:
+        raise ValueError(f"Could not detect state/estimate columns in {csv_path}")
 
     results = {}
     for row in reader:
         state = row[state_col].strip()
-        val_str = row[estimate_col].strip().replace(",", "")
+        val = _to_float(row.get(estimate_col))
         if state in ALL_STATES or state == "District of Columbia":
-            try:
-                results[state] = float(val_str)
-            except ValueError:
-                continue
+            if val is not None:
+                results[state] = val
     return results
 
 
