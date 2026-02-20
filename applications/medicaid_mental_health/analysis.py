@@ -17,9 +17,13 @@ import argparse
 import numpy as np
 import sys
 import os
+from pathlib import Path
 
 # Add project root to path so methods package is importable
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+THIS_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = THIS_DIR.parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(THIS_DIR))
 
 from methods.utils import ols_fit, add_const
 from methods import did as m_did
