@@ -6,6 +6,7 @@ DiD analysis of the effect of state-level Medicaid expansion on
 mental health outcomes, using methods from the PracticalMath methods/ package.
 
 Data sources (see load_data.py for details):
+  - BRFSS state-year panel (from brfss_extract_with_states_v3.py)
   - SAMHSA NSDUH state prevalence estimates (mental health outcomes)
   - CMS Medicaid enrollment data via data.medicaid.gov (enrollment outcome)
   - KFF Medicaid expansion dates (treatment assignment)
@@ -30,7 +31,7 @@ from methods import did as m_did
 from methods import panel_fe as m_fe
 from methods import heteroskedasticity as m_het
 
-from load_data import load_real_data, EXPANSION_YEAR
+from load_data import load_real_data, load_brfss_panel, EXPANSION_YEAR, BRFSS_OUTCOME_COLUMNS
 
 
 def simulate_medicaid_data(n_states=50, n_years=10, treatment_year=5,
@@ -88,12 +89,20 @@ def main():
         description="Medicaid Expansion & Mental Health -- DiD Analysis"
     )
     parser.add_argument(
-        "--source", choices=["auto", "nsduh", "cms", "simulate"],
+        "--source", choices=["auto", "brfss", "nsduh", "cms", "simulate"],
         default="auto",
-        help="Data source: 'nsduh' for NSDUH mental health outcomes, "
+        help="Data source: 'brfss' for BRFSS survey outcomes, "
+             "'nsduh' for NSDUH mental health outcomes, "
              "'cms' for CMS enrollment data, 'simulate' for synthetic data, "
              "'auto' to try real sources then fall back to simulation "
              "(default: auto)"
+    )
+    parser.add_argument(
+        "--brfss-outcome",
+        choices=list(BRFSS_OUTCOME_COLUMNS.keys()),
+        default="freq_mental_distress",
+        help="BRFSS outcome variable (used when --source is 'brfss' or 'auto'). "
+             "Default: freq_mental_distress"
     )
     args = parser.parse_args()
 
@@ -106,17 +115,24 @@ def main():
     if args.source == "simulate":
         print("\n[Data] Using simulated data")
         data = simulate_medicaid_data()
+    elif args.source == "brfss":
+        data = load_brfss_panel(outcome=args.brfss_outcome)
+        using_real_data = True
     elif args.source in ("nsduh", "cms"):
         data = load_real_data(prefer=args.source)
         using_real_data = True
     else:
-        # auto: try real data, fall back to simulation
+        # auto: try brfss first, then nsduh/cms, then fall back to simulation
         try:
-            data = load_real_data(prefer="nsduh")
+            data = load_brfss_panel(outcome=args.brfss_outcome)
             using_real_data = True
-        except RuntimeError:
-            print("\n[Data] Real data unavailable, using simulated data")
-            data = simulate_medicaid_data()
+        except (FileNotFoundError, ValueError):
+            try:
+                data = load_real_data(prefer="nsduh")
+                using_real_data = True
+            except RuntimeError:
+                print("\n[Data] Real data unavailable, using simulated data")
+                data = simulate_medicaid_data()
 
     n_obs = len(data["y"])
     n_treated = int(data["treated"].sum())
