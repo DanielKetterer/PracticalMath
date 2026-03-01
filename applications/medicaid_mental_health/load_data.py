@@ -424,6 +424,11 @@ def _parse_generated_nsduh_panel_csv(csv_path):
     return _build_panel_from_records(records, state_list, "nsduh_generated_csv")
 
 
+def _auto_prepare_nsduh_data(nsduh_dir):
+    """Placeholder for automatic NSDUH data preparation (not yet implemented)."""
+    pass
+
+
 def load_nsduh_panel(
     nsduh_dir=None,
     outcome="ami",
@@ -716,6 +721,141 @@ def load_cms_enrollment_panel(
 
 
 # ---------------------------------------------------------------------------
+# BRFSS State-Year Panel -- from brfss_extract_with_states_v3.py output
+# ---------------------------------------------------------------------------
+
+BRFSS_OUTCOME_COLUMNS = {
+    "freq_mental_distress": "freq_mental_distress_mean",
+    "mh_days_not_good": "mh_days_not_good_mean",
+    "any_mh_days": "any_mh_days_mean",
+    "depression_dx": "depression_dx_mean",
+    "has_insurance": "has_insurance_mean",
+    "cost_barrier": "cost_barrier_mean",
+    "has_medicaid": "has_medicaid_mean",
+}
+
+
+def _resolve_brfss_panel_path(brfss_dir=None):
+    """Find brfss_state_year_panel.csv in common project locations."""
+    if brfss_dir is not None:
+        return Path(brfss_dir) / "brfss_state_year_panel.csv"
+
+    app_dir = Path(__file__).resolve().parent
+    repo_root = app_dir.parents[1]
+    candidates = [
+        app_dir / "brfss_output" / "brfss_state_year_panel.csv",
+        repo_root / "brfss_output" / "brfss_state_year_panel.csv",
+        DATA_DIR / "brfss" / "brfss_state_year_panel.csv",
+        repo_root / "data" / "brfss" / "brfss_state_year_panel.csv",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    # Default path (will trigger FileNotFoundError downstream)
+    return candidates[0]
+
+
+def load_brfss_panel(
+    brfss_dir=None,
+    outcome="freq_mental_distress",
+    year_range=(2010, 2023),
+):
+    """
+    Build a state-year panel from BRFSS data extracted by
+    brfss_extract_with_states_v3.py.
+
+    Parameters
+    ----------
+    brfss_dir : str or Path, optional
+        Directory containing brfss_state_year_panel.csv.
+        Searched automatically if not specified.
+    outcome : str
+        Outcome variable. One of: freq_mental_distress, mh_days_not_good,
+        any_mh_days, depression_dx, has_insurance, cost_barrier, has_medicaid.
+    year_range : tuple
+        (start_year, end_year) inclusive.
+
+    Returns
+    -------
+    dict with arrays: y, treated, post, state_ids, year_ids, state_names,
+                      years, outcome_label
+    """
+    panel_path = _resolve_brfss_panel_path(brfss_dir)
+
+    if not panel_path.exists():
+        raise FileNotFoundError(
+            f"BRFSS state-year panel not found at {panel_path}. "
+            "Run brfss_extract_with_states_v3.py first to generate the data."
+        )
+
+    outcome_col = BRFSS_OUTCOME_COLUMNS.get(outcome)
+    if outcome_col is None:
+        raise ValueError(
+            f"Unknown BRFSS outcome '{outcome}'. "
+            f"Available: {list(BRFSS_OUTCOME_COLUMNS.keys())}"
+        )
+
+    start_yr, end_yr = year_range
+
+    state_set = set()
+    raw_records = []
+
+    with open(panel_path, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+
+        if outcome_col not in (reader.fieldnames or []):
+            raise ValueError(
+                f"Column '{outcome_col}' not found in {panel_path}. "
+                f"Available columns: {reader.fieldnames}"
+            )
+
+        for row in reader:
+            state_name = row.get("state_name", "").strip()
+            if not state_name:
+                continue
+            # Normalize: accept both ALL_STATES entries and DC variants
+            if state_name not in ALL_STATES and state_name != "District of Columbia":
+                continue
+
+            try:
+                yr = int(row.get("year", "").strip())
+            except ValueError:
+                continue
+
+            if yr < start_yr or yr > end_yr:
+                continue
+
+            val_str = row.get(outcome_col, "").strip()
+            if not val_str or val_str.lower() in ("nan", "na", ""):
+                continue
+
+            try:
+                val = float(val_str)
+            except ValueError:
+                continue
+
+            state_set.add(state_name)
+            raw_records.append((state_name, yr, val))
+
+    if not raw_records:
+        raise FileNotFoundError(
+            f"No valid records found in {panel_path} for outcome '{outcome}' "
+            f"in year range {year_range}."
+        )
+
+    state_list = sorted(state_set)
+    state_to_idx = {s: i for i, s in enumerate(state_list)}
+
+    records = []
+    for state_name, yr, val in raw_records:
+        records.append((state_to_idx[state_name], yr, val))
+
+    print(f"  [BRFSS] Loaded {len(records)} state-year observations "
+          f"from {panel_path.name}")
+    return _build_panel_from_records(records, state_list, f"brfss_{outcome}")
+
+
+# ---------------------------------------------------------------------------
 # Convenience: build a panel from whatever data sources are available
 # ---------------------------------------------------------------------------
 
@@ -726,7 +866,7 @@ def load_real_data(prefer="nsduh", **kwargs):
     Parameters
     ----------
     prefer : str
-        Which source to try first: "nsduh" or "cms".
+        Which source to try first: "brfss", "nsduh", or "cms".
     **kwargs : dict
         Passed through to the chosen loader.
 
@@ -735,6 +875,7 @@ def load_real_data(prefer="nsduh", **kwargs):
     dict : panel data compatible with methods/ package
     """
     loaders = {
+        "brfss": load_brfss_panel,
         "nsduh": load_nsduh_panel,
         "cms": load_cms_enrollment_panel,
     }
@@ -752,14 +893,15 @@ def load_real_data(prefer="nsduh", **kwargs):
                   f"({n_states} states x {n_years} years) "
                   f"from {source.upper()}")
             return data
-        except (FileNotFoundError, ConnectionError, ValueError) as e:
+        except (FileNotFoundError, ConnectionError, ValueError, TypeError) as e:
             print(f"[load_data] {source.upper()} unavailable: {e}")
             last_error = e
 
     raise RuntimeError(
         "No real data sources available. Either:\n"
-        "  1. Download NSDUH SAE CSVs to data/nsduh/ (see README)\n"
-        "  2. Ensure network access for CMS API download\n"
-        "  3. Use simulate_medicaid_data() as a fallback\n"
+        "  1. Run brfss_extract_with_states_v3.py to generate BRFSS panel\n"
+        "  2. Download NSDUH SAE CSVs to data/nsduh/ (see README)\n"
+        "  3. Ensure network access for CMS API download\n"
+        "  4. Use simulate_medicaid_data() as a fallback\n"
         f"Last error: {last_error}"
     )
